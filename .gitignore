@@ -1,6 +1,8 @@
-api/storage/
-*.ipynb_checkpoints
-POTHOLE_DATASET
-Waste-Detection-YOLO-1
-__pycache__
-venv
+venv/
+POTHOLE_DATASET/
+__pycache__/
+instance/
+Waste-Detection-YOLO-1/
+.env
+uploads/
+runs/

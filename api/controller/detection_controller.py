@@ -1,115 +1,173 @@
-#to handle all HTTP requests
-#defines alll API routes
-from flask import Blueprint, request, jsonify,current_app, send_from_directory
-from service.detection_service import processed_detection
-from models.detection_model import Detection
-from database import db
 import os
-from sqlalchemy import delete
+from flask import Blueprint, request, jsonify, current_app
+from database import db
+from api.models.detection_model import Pothole, Waste
+from api.service.detection_service import detect_image_type
 
-detection_bp = Blueprint("detection_bp", __name__)
-# GET= to fetch all detections at once 
-@detection_bp.route('/detect', methods=['GET'])
-def get_all_detections():
-    detections = Detection.query.all()
-    return jsonify([d.to_dict() for d in detections]), 200
+# Base Blueprint
+detection_bp = Blueprint('detection_bp', __name__, url_prefix='/detections')
+
+# NOTE: स्थानीय UPLOAD_FOLDER परिभाषा हटाइएको छ, Flask कन्फिगरेसन प्रयोग गरिनेछ।
 
 
-# GET =by ID
-@detection_bp.route('/detect/<int:id>', methods=['GET'])
-def get_detection_by_id(id):
-    detection = Detection.query.get(id)
-    if not detection:
-        return jsonify({'error': 'Detection not found'}), 404
-    return jsonify(detection.to_dict()), 200
-
-# POST=upload the image
-@detection_bp.route('/detect', methods=['POST'])
-def detect_pothole():
+# ---------------- POST: Detect and save ----------------
+@detection_bp.route('/', methods=['POST'])
+def detect():
+    # ... (सुरुवाती validation र data extraction कोड अपरिवर्तित)
     image = request.files.get('image')
     lat = request.form.get('latitude')
     lon = request.form.get('longitude')
     location = request.form.get('location')
 
     if not image or not lat or not lon or not location:
-        return jsonify({'error': 'Missing required fields...'}), 400
+        return jsonify({'error': 'Missing required fields'}), 400
 
-    results = processed_detection(image, lat, lon, location)
-    return jsonify({"message": "Detection saved", "data": results}), 201
-
-
-
-# PUT= Update detection status or info
-@detection_bp.route('/detect/<int:id>', methods=['PUT'])
-def update_detection(id):
-    detection = Detection.query.get(id)
-    if not detection:
-        return jsonify({'error': 'Detection not found'}), 404
-    
-    detection.location = request.form.get('location', detection.location)
-    #to update the status
-    detection.status = request.form.get('status', detection.status)
-    
-    detection.latitude = request.form.get('latitude', detection.latitude)
-    detection.longitude = request.form.get('longitude', detection.longitude)
-    db.session.commit()
-    
-    # Return the updated detection object to confirm the status change immediately
-    return jsonify({'message': 'Detection status updated successfully', 'data': detection.to_dict()}), 200
-
-
-
-#DELETE Request
-
-#function to delete the saved files
-def delete_files(detection):
-    DETECTED_FOLDER = current_app.config['DETECTED_FOLDER']
-    # to delete detected (processed) image (from the 'detected_potholes/results' folder)
-    detected_relative_path = detection.detected_image_path
-    if detected_relative_path:
-        detected_full_path = os.path.join(DETECTED_FOLDER, detected_relative_path)
-        try:
-            if os.path.exists(detected_full_path):
-                os.remove(detected_full_path)
-        except Exception as e:
-            print(f"Error deleting detected image file {detected_full_path}: {e}")
-
-
-# DELETE= remove all dtection and files
-@detection_bp.route('/detect', methods=['DELETE'])
-def delete_all_detections():
-    #fetcing all detections to gettheir file paths
-    detections = Detection.query.all()
-    if not detections:
-        return jsonify({'error': 'No detections found to delete!'}), 404
-    deleted_count = 0
-
-    #Iterate, delete files and stage database deletion for each record inthe db
-    for detection in detections:
-        delete_files(detection)
-        db.session.delete(detection)
-        deleted_count += 1
     try:
-        db.session.commit()
-        return jsonify({'message': f'All {deleted_count} detection files are deleted successfully'}), 200
-    except Exception as e:
-        # if in case of database error
-        db.session.rollback()
-        print(f"Error during database deletion: {e}")
-        return jsonify({'error': 'Failed to delete records from the database!'}), 500
+        latitude = float(lat)
+        longitude = float(lon)
+    except ValueError:
+        return jsonify({'error': 'Latitude and Longitude must be valid numbers'}), 400
+    # ... (सुरुवाती validation र data extraction कोड समाप्त)
 
 
-# DELETE= by id (remove simgle file)
-@detection_bp.route('/detect/<int:id>', methods=['DELETE'])
-def delete_detection_by_id(id):
-    detection = Detection.query.get(id) #ORM use vako
-    if not detection:
-        return jsonify({'error': 'Detection not found'}), 404
-    #to deelete associated files first
-    delete_files(detection)
+    detection_type, result_data = detect_image_type(image)
 
-    # to delete the database record
-    db.session.delete(detection)
-    db.session.commit()
+    if not detection_type:
+        return jsonify({'message': 'No pothole or waste detected in the image'}), 200
     
-    return jsonify({'message': 'Detection file  deleted successfully'}), 200
+    # Flask कन्फिगरेसनबाट UPLOAD_FOLDER लिने
+    UPLOAD_FOLDER = current_app.config.get('UPLOAD_FOLDER')
+    if not UPLOAD_FOLDER:
+        return jsonify({'error': 'UPLOAD_FOLDER is not configured in Flask app'}), 500
+
+    # Filenames from service (यी UPLOAD_FOLDER भित्रका अस्थायी नामहरू हुन्)
+    temp_original_filename = result_data['image_name']
+    temp_detected_filename = result_data['detected_image_path']
+
+    # --- Create directories and paths ---
+    original_folder = os.path.join(UPLOAD_FOLDER, detection_type, "original")
+    detected_folder = os.path.join(UPLOAD_FOLDER, detection_type, "detected")
+    os.makedirs(original_folder, exist_ok=True)
+    os.makedirs(detected_folder, exist_ok=True)
+
+    # 1. Move the original uploaded image from temp location to final 'original' folder
+    temp_original_path = os.path.join(UPLOAD_FOLDER, temp_original_filename)
+    final_original_path = os.path.join(original_folder, temp_original_filename)
+    
+    if os.path.exists(temp_original_path):
+        # os.rename प्रयोग गरेर अस्थायी फाइललाई 'original' फोल्डरमा सार्ने
+        os.rename(temp_original_path, final_original_path)
+    else:
+        # Service ले बचत नगरेको खण्डमा त्रुटि
+        return jsonify({'error': 'Uploaded image file was not found after detection'}), 500
+    
+    
+    final_detected_image_path_db = None
+    
+    # 2. Move the detected (annotated) image from temp location to final 'detected' folder
+    if temp_detected_filename:
+        temp_detected_path = os.path.join(UPLOAD_FOLDER, temp_detected_filename)
+        final_detected_path = os.path.join(detected_folder, temp_detected_filename)
+
+        if os.path.exists(temp_detected_path):
+            # os.rename प्रयोग गरेर पत्ता लागेको फाइललाई 'detected' फोल्डरमा सार्ने
+            os.rename(temp_detected_path, final_detected_path)
+            # DB मा बचत गर्नका लागि अन्तिम पथ
+            final_detected_image_path_db = final_detected_path 
+            
+    # --- Create DB record ---
+    if detection_type == 'pothole':
+        record = Pothole(
+            image_name=temp_original_filename, # सुरक्षित नामको आवश्यकता छैन किनकि service मा timestamp जोडिएको छ
+            detected_image_path=final_detected_image_path_db,
+            location=location,
+            latitude=latitude,
+            longitude=longitude,
+            status=result_data.get('status', 'pending')
+        )
+    elif detection_type == 'waste':
+        record = Waste(
+            image_name=temp_original_filename, # सुरक्षित नामको आवश्यकता छैन
+            detected_image_path=final_detected_image_path_db,
+            location=location,
+            latitude=latitude,
+            longitude=longitude,
+            detection_status=result_data.get('detection_status', 'pending'),
+            is_waste=result_data.get('is_waste', False),
+            waste_category=result_data.get('waste_category', ''),
+            is_recyclable=result_data.get('is_recyclable', False),
+            is_decomposable=result_data.get('is_decomposable', False)
+        )
+    else:
+        return jsonify({'error': 'Invalid detection type from service'}), 500
+
+    db.session.add(record)
+    db.session.commit()
+
+    return jsonify({
+        'message': f'{detection_type.capitalize()} detected successfully',
+        'data': record.to_dict()
+    }), 201
+
+
+# ... (बाँकी GET, PUT, DELETE routes अपरिवर्तित)
+# ---------------- GET: Retrieve all detections ----------------
+@detection_bp.route('/', methods=['GET'])
+def get_all_detections():
+    potholes = [p.to_dict() for p in Pothole.query.all()]
+    wastes = [w.to_dict() for w in Waste.query.all()]
+    return jsonify({'potholes': potholes, 'wastes': wastes}), 200
+
+
+# ---------------- GET: Retrieve single detection by ID ----------------
+@detection_bp.route('/<string:detection_type>/<int:id>', methods=['GET'])
+def get_detection(detection_type, id):
+    if detection_type == 'pothole':
+        record = Pothole.query.get_or_404(id)
+    elif detection_type == 'waste':
+        record = Waste.query.get_or_404(id)
+    else:
+        return jsonify({'error': 'Invalid detection type'}), 400
+    return jsonify(record.to_dict()), 200
+
+
+# ---------------- PUT: Update detection ----------------
+@detection_bp.route('/<string:detection_type>/<int:id>', methods=['PUT'])
+def update_detection(detection_type, id):
+    data = request.json
+    if detection_type == 'pothole':
+        record = Pothole.query.get_or_404(id)
+        record.status = data.get('status', record.status)
+        record.location = data.get('location', record.location)
+        record.latitude = data.get('latitude', record.latitude)
+        record.longitude = data.get('longitude', record.longitude)
+    elif detection_type == 'waste':
+        record = Waste.query.get_or_404(id)
+        record.detection_status = data.get('detection_status', record.detection_status)
+        record.is_waste = data.get('is_waste', record.is_waste)
+        record.waste_category = data.get('waste_category', record.waste_category)
+        record.is_recyclable = data.get('is_recyclable', record.is_recyclable)
+        record.is_decomposable = data.get('is_decomposable', record.is_decomposable)
+        record.location = data.get('location', record.location)
+        record.latitude = data.get('latitude', record.latitude)
+        record.longitude = data.get('longitude', record.longitude)
+    else:
+        return jsonify({'error': 'Invalid detection type'}), 400
+
+    db.session.commit()
+    return jsonify({'message': f'{detection_type.capitalize()} updated', 'data': record.to_dict()}), 200
+
+
+# ---------------- DELETE: Remove detection ----------------
+@detection_bp.route('/<string:detection_type>/<int:id>', methods=['DELETE'])
+def delete_detection(detection_type, id):
+    if detection_type == 'pothole':
+        record = Pothole.query.get_or_404(id)
+    elif detection_type == 'waste':
+        record = Waste.query.get_or_404(id)
+    else:
+        return jsonify({'error': 'Invalid detection type'}), 400
+
+    db.session.delete(record)
+    db.session.commit()
+    return jsonify({'message': f'{detection_type.capitalize()} deleted successfully'}), 200

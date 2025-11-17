@@ -1,0 +1,8 @@
+venv/
+POTHOLE_DATASET/
+__pycache__/
+instance/
+Waste-Detection-YOLO-1/
+.env
+uploads/
+runs/
