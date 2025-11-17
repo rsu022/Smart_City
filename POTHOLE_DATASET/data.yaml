@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 3
+names: ['major_pothole', 'medium_pothole', 'minor_pothole']
+
+roboflow:
+  workspace: detection-pplei
+  project: pothole-detection-nqake
+  version: 1
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/detection-pplei/pothole-detection-nqake/dataset/1
